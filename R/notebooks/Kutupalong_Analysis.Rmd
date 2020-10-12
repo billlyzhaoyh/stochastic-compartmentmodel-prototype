@@ -1,0 +1,1273 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+# Analysis of COVID-19 in Kutupalong Expansion Site
+
+Shaun Truelove
+shauntruelove@jhu.edu
+
+March 2020
+
+
+
+
+```{r setup, include=FALSE, message = F, warning = F, results = F}
+require(knitr)
+require(tidyverse)
+require(gridExtra)
+library(doParallel)
+# require(rstan)
+library(RColorBrewer)
+#library(RgoogleMaps)
+
+options(scipen = 999)
+knitr::opts_knit$set(root.dir = "..")
+knitr::opts_chunk$set(echo=TRUE)
+#knitr::opts_knit$set(root.dir = normalizePath("../"))
+
+```
+
+
+```{r include=FALSE, message = F, warning = F, results = F}
+source("R/DataLoadUtils.r")
+source("R/BasicEpiAnalyses.r")
+source("R/DataUtils.r")
+source("R/model_functions.R")
+source("R/StochasticSEIR.R")
+source("R/CalcHospDeaths.R")
+source("R/get_ageadjust_severe.R")
+```
+
+# CONTEXT: Kutupalong-Bulakhali Expansion Site
+
+```{r}
+
+project <- "Kutupalong"
+dir.create(file.path("results",project), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path("figures",project), recursive = TRUE, showWarnings = FALSE)
+
+
+```
+
+
+
+# PROPORTION SEVERE
+
+In a setting such as a refugee setting we will assume hospitalization will be limited to those who most require it, specifically severe cases. We assume all hospitalization capacity available will be shifted for responding to COVID-19 severe cases, and no hospitalization for purposes of isolation will be done. Under these assumptions, we can assume the proportion of infections that result in severe disease approximate the proportion that will require hospitalization.
+
+While we are still trying to understand who is most at risk for severe disease and what proporiton of individuals infected will eventually develop severe disease and die, we do know that this is highly dependent on age. To get an appropriate estimate of severity in different populations, we will use estimates of proportion severe by age to adjust by the populations age distribution and get an overall proportion severe for the population of interest.
+
+
+### Estimate proportions severe by age, using data from Shenzhen, China (Bi et al. 2020)
+
+We will use bayesian methods to estimate the proportion severe by age, using data from Shenzhen, China (Bi et al. 2020).
+
+```{r, eval=FALSE}
+# Run Stan Model to estimate probability severe by age
+#prop_severe_ests <- get_severe_age_shenzhen( )
+severe_age_prob <- read_csv("data/severe_age_prob.csv")
+
+
+```
+    
+    
+### Application to Age Distributions
+
+Now we can apply these estimates to age distributions of different locations.
+
+```{r}
+
+# USA
+p_usa <- get_p_severe(country="United States of America")
+
+# Bangladesh
+p_bgd <- get_p_severe(country="Bangladesh")
+
+# China
+p_chn <- get_p_severe(country="China")
+
+# Italy
+p_ita <- get_p_severe(country="Italy")
+
+# Switzerland
+p_che <- get_p_severe(country="Switzerland")
+
+
+p_data <- bind_rows(data.frame(Location = "USA", p_severe=p_usa$ests),
+                    data.frame(Location = "China", p_severe=p_chn$ests),
+                    data.frame(Location = "Bangladesh", p_severe=p_bgd$ests),
+                    data.frame(Location = "Italy", p_severe=p_ita$ests),
+                    data.frame(Location = "Switzerland", p_severe=p_che$ests)) %>%
+  mutate(Location=factor(Location, levels=c("Bangladesh","China","USA","Switzerland","Italy"), ordered = TRUE))
+
+
+```
+
+
+
+
+### Proportion Severe, Kutupalong-Balukhali expansion site
+    
+Now we need to apply the population structure of Kutupalong to estimate proportion hospitalized there.
+
+```{r}
+
+pop_age <- read_csv(file.path("data",project,"age_kutupalong.csv"))
+age_smooth <- smooth.spline(pop_age$mid, pop_age$tot_per_year)
+pr_age <- predict(age_smooth, data.frame(mid=0:89)) %>% as.data.frame()
+pr_age <- pr_age %>% rename(age=mid, prop=mid.1) %>% mutate(prop = prop / sum(pr_age$mid.1))
+plot(pr_age$age, pr_age$prop)
+points(pop_age$mid, pop_age$tot_per_year, col="blue", pch=20)
+
+# Get age by 10yr groups
+pr_age <- pr_age %>% mutate(age10 = floor(age/10)*10)
+pr_age10 <- pr_age %>% group_by(age10) %>% summarise(pr10 = sum(prop)) %>%
+    mutate(age = paste0(age10, "-", age10+9))
+pr_age10_kutupalong <- as.numeric(pr_age10$pr10)
+pr_age10_kutupalong[8] <- sum(pr_age10_kutupalong[8:9])
+pr_age10_kutupalong <- pr_age10_kutupalong[-9]
+names(pr_age10_kutupalong) <- 0:(length(pr_age10_kutupalong)-1)
+
+
+# Estimate the proportion severe in the camp
+p_severe_kutupalong <- get_p_severe_pop(pr_age10_kutupalong)
+save(p_severe_kutupalong, file=file.path("results", project, "p_severe_kutupalong.RData"))
+
+
+
+# PLOT IT
+p_data <- bind_rows(p_data, data.frame(Location = "Kutupalong-\nBulakhali", p_severe=p_severe_kutupalong$ests)) %>%
+  mutate(Location=factor(Location, 
+                         levels=c("Kutupalong-\nBulakhali", "Bangladesh","China","USA","Switzerland","Italy"), 
+                         ordered = TRUE)) %>%
+  mutate(col_ = ifelse(Location=="Kutupalong-\nBulakhali", 2, 1))
+
+# Make some boxplots
+fills <- c("1"="maroon", "2"="gold")
+cols <- c("1"="darkred", "2"="goldenrod1")
+ggplot(p_data, aes(x=Location, y=p_severe, fill=factor(col_), colour=factor(col_))) +
+  geom_boxplot() + 
+  scale_color_manual(values=c("darkred", "goldenrod4")) +
+  scale_fill_manual(values=c("maroon", "goldenrod1")) +
+  ylab("Proportion Severe") +
+  theme(legend.position = "none")
+  
+
+```
+
+Based on this crude analysis, if we assume 75% of infections in those 70+ lead to hospitalization, and the odds of hospitalization given infection by age mirrors the odds of mortality by age, we find that the hospitalization rate in Kutupalong is likely to be between 4.9-9.2%, compared with 14.0-21.8% in China. From these estimates, it is reasonable to assume infections in Kutupalong are 35-43% as likely to result in a hositalization, as compared to China.
+
+
+
+# PARAMETERS
+
+### R0 Estimates Check
+```{r}
+r0 <- c(2.68,2.24,0.3,1.44,2.1,3.2,7.05,2.4,2.4,4.7,6.6,
+        3.24,2.45,1.48,3.1,1.6,3.11,2.5,2.6,2.2)
+
+quantile(r0, c(0.025, .975))
+
+```
+
+
+
+## Model Parameters
+
+```{r}
+
+# Simulation specifics   ----------------------------------------------
+n.sims <- 50 # simulations per R
+n.Rs <- 20
+run_time <- 550
+start_date_="2020-03-15"
+end_date <- "2022-01-01"
+step.size <- 1/8
+seeds <- 1
+cores <- 4
+
+# Population Size - Kutupalong camp
+N <- 600000
+
+
+# Transmission Characteristics ---------------------------------
+# we are going to assume recovery has mean of 7 days from infection
+# then we will use a beta consistent with our estimates from above
+# https://github.com/midas-network/COVID-19/tree/master/parameter_estimates/2019_novel_coronavirus
+
+# incubation period 5.2 days based on an estimate from Lauer et al. 2020
+sigma <- 1/(5.2) # subtract 1 for latent period adjustment
+# time from symptom onset to recovery  
+n_Icomp <- 3 # number of I compartments (using 3 to capture Erlang distribution)
+gamma <-  1/6 * n_Icomp 
+
+
+
+# R0 Values  ----------------------------------------------
+
+# Controlled transmission 
+R0_low <- runif(n.Rs, 1.5,2)
+# Moderate transmission
+R0_mid <- runif(n.Rs, 2, 3)
+# Inflated transmission (inflated by the diphtheria inflation factor)
+R0_high <- runif(n.Rs, 2*1.65, 3*1.65)
+
+
+# sample point estimates of our betas from above
+betas_low <- R0_low   * gamma / n_Icomp
+betas_mid <- R0_mid   * gamma / n_Icomp
+betas_high <- R0_high * gamma / n_Icomp
+
+
+
+
+
+
+# Hospitalization   ----------------------------------------------
+
+
+# time from hospitalization to discharge mean= 11.5, sd=3.625
+# time from hospitalization to death mean= 11.2, sd= 1.88
+# Time to hospitalization among symptom-based, mean 4.65 days (95% CI 0.93-12.42) (Bi et al. 2020)
+# Time from hospitalization to discharge,  11.5 days (95% CI 8.0-17.3) (Sanche et al. 2020)
+# Time from hospitalization to death, 11.2 days (95% CI 8.7-14.9) (Sanche et al. 2020)
+
+#p_hosp  <- c(p_severe_kutupalong, p_hosp_kutupalong_high)
+p_death <- .1
+p_ICU   <- 0.264
+p_vent  <- 0.15
+
+time_hosp_pars = c(1.23, 0.79)
+time_death_pars = c(log(11.25), log(1.15))
+time_disch_pars = c(log(11.5), log(1.22)) 
+
+```
+
+
+
+# MODEL
+    
+### Run the model 
+We can do this locally or on a cluster if needed.
+
+```{r}
+
+betas <- betas_low
+sim_res <- run_seir_model_parallel(project, n.sims=n.sims, N=N, betas=betas, R0_val="low",
+                                   sigma=sigma,
+                                   gamma=gamma,
+                          seeds=seeds, start_date_=start_date_, step.size=step.size,
+                          run_time=run_time, cores=cores)
+
+betas <- betas_mid
+sim_res <- run_seir_model_parallel(project, n.sims=n.sims, N=N, betas=betas, R0_val="mid", sigma=sigma,
+                                   gamma=gamma,
+                          seeds=seeds, start_date_=start_date_, step.size=step.size,
+                          run_time=run_time, cores=cores)
+
+betas <- betas_high
+sim_res <- run_seir_model_parallel(project, n.sims=n.sims, N=N, betas=betas, R0_val="high", sigma=sigma,
+                                   gamma=gamma,
+                          seeds=seeds, start_date_=start_date_, step.size=step.size,
+                          run_time=run_time, cores=cores)
+
+```
+    
+
+   
+### Low Beta
+```{r, echo=FALSE}
+load(file=file.path("results", project, "p_severe_kutupalong.RData")) # p_severe_kutupalong
+
+#res_date <- paste0(month.abb[lubridate::month(Sys.Date())],lubridate::day(Sys.Date()))
+res_date <- "Mar19"
+
+
+R0_val <- "low"
+sim_res <- read_csv(file.path("results", project, paste0("sim_res_nohosp_", R0_val,"-",res_date,".csv")))
+
+
+sim_res <- sim_res %>%
+    rename(time=date, incidI=incid) %>% 
+    mutate(geoid = "KB_ES", sim_num=as.integer(sim_id)) %>%
+    mutate(uid = paste0(geoid, "-", sim_num))
+
+
+# Get Hospitalizations
+sim_hospdeath <- build_hospdeath_par(
+                            data=sim_res, p_hosp=p_severe_kutupalong, 
+                            p_death, p_vent, p_ICU, p_hosp_type="gamma",
+                            time_hosp_pars = c(1.23, 0.79), 
+                            time_ICU_pars = c(log(10.5), log((10.5-7)/1.35)),
+                            time_vent_pars = c(log(10.5), log((10.5-8)/1.35)),
+                            time_death_pars = c(log(11.25), log(1.15)), 
+                            time_disch_pars = c(log(11.5), log(1.22)),
+                            time_ICUdur_pars = c(log(16), log(2.96)),
+                            end_date = "2022-01-01",
+                            length_geoid = 5,
+                            cores=4, 
+                            run_parallel=TRUE)
+colnames(sim_hospdeath)
+
+
+# Get simulation info to fill in where needed
+sim_info <- sim_res %>% select(sim, beta_ind, sim_beta, sim_id, beta, seeds) %>% 
+  filter(!duplicated(paste0(sim, beta_ind)))
+
+
+sim_res_full <- sim_hospdeath %>% dplyr::select(sim_beta, sim, beta_ind, sim_id, beta, seeds, time, day, everything()) %>%
+  mutate(scenario = "Low") %>% rename(t=time) %>%
+  filter(!is.na(day))
+
+sim_res_full <- sim_res_full %>% 
+  arrange(sim_beta, t) %>%
+  group_by(sim_beta) %>%
+  mutate(cum_hosp = cumsum(incidH),
+         cum_vent = cumsum(incidVent),
+         cum_icu = cumsum(incidICU),
+         cum_death = cumsum(incidD)) %>% ungroup()
+
+sim_res_full <- sim_res_full %>% filter(!is.na(t))  
+
+
+# Rename it
+sim_res_low <- sim_res_full
+rm(sim_res)
+
+# Save it
+dir.create("results", recursive = TRUE, showWarnings = FALSE)
+write_csv(sim_res_full, file.path("results", project, paste0("sim_res_low_", res_date, ".csv")))
+
+```
+
+    
+    
+    
+### Mid Beta
+```{r, echo=FALSE}
+load(file=file.path("results", project, "p_severe_kutupalong.RData")) # p_severe_kutupalong
+
+#res_date <- paste0(month.abb[lubridate::month(Sys.Date())],lubridate::day(Sys.Date()))
+res_date <- "Mar19"
+
+
+R0_val <- "mid"
+sim_res <- read_csv(file.path("results", project, paste0("sim_res_nohosp_", R0_val,"-",res_date,".csv")))
+
+
+sim_res <- sim_res %>%
+    rename(time=date, incidI=incid) %>% 
+    mutate(geoid = "KB_ES", sim_num=as.integer(sim_id)) %>%
+    mutate(uid = paste0(geoid, "-", sim_num))
+
+
+# Get Hospitalizations
+sim_hospdeath <- build_hospdeath_par(
+                            data=sim_res, p_hosp=p_severe_kutupalong, 
+                            p_death, p_vent, p_ICU, p_hosp_type="gamma",
+                            time_hosp_pars = c(1.23, 0.79), 
+                            time_ICU_pars = c(log(10.5), log((10.5-7)/1.35)),
+                            time_vent_pars = c(log(10.5), log((10.5-8)/1.35)),
+                            time_death_pars = c(log(11.25), log(1.15)), 
+                            time_disch_pars = c(log(11.5), log(1.22)),
+                            time_ICUdur_pars = c(log(16), log(2.96)),
+                            end_date = "2022-01-01",
+                            length_geoid = 5,
+                            cores=4, 
+                            run_parallel=TRUE)
+colnames(sim_hospdeath)
+
+
+# Get simulation info to fill in where needed
+sim_info <- sim_res %>% select(sim, beta_ind, sim_beta, sim_id, beta, seeds) %>% 
+  filter(!duplicated(paste0(sim, beta_ind)))
+
+
+sim_res_full <- sim_hospdeath %>% dplyr::select(sim_beta, sim, beta_ind, sim_id, beta, seeds, time, day, everything()) %>%
+  mutate(scenario = "Mid") %>% rename(t=time) %>%
+  filter(!is.na(day))
+
+sim_res_full <- sim_res_full %>% 
+  arrange(sim_beta, t) %>%
+  group_by(sim_beta) %>%
+  mutate(cum_hosp = cumsum(incidH),
+         cum_vent = cumsum(incidVent),
+         cum_icu = cumsum(incidICU),
+         cum_death = cumsum(incidD)) %>% ungroup()
+
+sim_res_full <- sim_res_full %>% filter(!is.na(t))  
+
+
+# Rename it
+sim_res_mid <- sim_res_full
+rm(sim_res)
+
+# Save it
+dir.create("results", recursive = TRUE, showWarnings = FALSE)
+write_csv(sim_res_full, 
+          file.path("results", project, paste0("sim_res_mid_", res_date, ".csv")))
+
+```
+
+
+
+### High Beta
+```{r, echo=FALSE}
+load(file=file.path("results", project, "p_severe_kutupalong.RData")) # p_severe_kutupalong
+
+#res_date <- paste0(month.abb[lubridate::month(Sys.Date())],lubridate::day(Sys.Date()))
+res_date <- "Mar19"
+
+
+R0_val <- "high"
+sim_res <- read_csv(file.path("results", project, paste0("sim_res_nohosp_", R0_val,"-",res_date,".csv")))
+
+
+sim_res <- sim_res %>%
+    rename(time=date, incidI=incid) %>% 
+    mutate(geoid = "KB_ES", sim_num=as.integer(sim_id)) %>%
+    mutate(uid = paste0(geoid, "-", sim_num))
+
+
+# Get Hospitalizations
+sim_hospdeath <- build_hospdeath_par(
+                            data=sim_res, p_hosp=p_severe_kutupalong, 
+                            p_death, p_vent, p_ICU, p_hosp_type="gamma",
+                            time_hosp_pars = c(1.23, 0.79), 
+                            time_ICU_pars = c(log(10.5), log((10.5-7)/1.35)),
+                            time_vent_pars = c(log(10.5), log((10.5-8)/1.35)),
+                            time_death_pars = c(log(11.25), log(1.15)), 
+                            time_disch_pars = c(log(11.5), log(1.22)),
+                            time_ICUdur_pars = c(log(16), log(2.96)),
+                            end_date = "2022-01-01",
+                            length_geoid = 5,
+                            cores=4, 
+                            run_parallel=TRUE)
+colnames(sim_hospdeath)
+
+
+# Get simulation info to fill in where needed
+sim_info <- sim_res %>% select(sim, beta_ind, sim_beta, sim_id, beta, seeds) %>% 
+  filter(!duplicated(paste0(sim, beta_ind)))
+
+
+sim_res_full <- sim_hospdeath %>% dplyr::select(sim_beta, sim, beta_ind, sim_id, beta, seeds, time, day, everything()) %>%
+  mutate(scenario = "High") %>% rename(t=time) %>%
+  filter(!is.na(day))
+
+sim_res_full <- sim_res_full %>% 
+  arrange(sim_beta, t) %>%
+  group_by(sim_beta) %>%
+  mutate(cum_hosp = cumsum(incidH),
+         cum_vent = cumsum(incidVent),
+         cum_icu = cumsum(incidICU),
+         cum_death = cumsum(incidD)) %>% ungroup()
+
+sim_res_full <- sim_res_full %>% filter(!is.na(t))  
+
+
+# Rename it
+sim_res_high <- sim_res_full
+rm(sim_res)
+
+# Save it
+write_csv(sim_res_high, 
+          file.path("results", project, paste0("sim_res_high_", res_date, ".csv")))
+
+```
+
+
+
+
+# RESULTS
+
+### ~ Combine results
+
+```{r}
+
+sim_res_high <- read_csv(file.path("results", project, paste0("sim_res_high_", res_date, ".csv")))
+sim_res_mid <- read_csv(file.path("results", project, paste0("sim_res_mid_", res_date, ".csv")))
+sim_res_low <- read_csv(file.path("results", project, paste0("sim_res_low_", res_date, ".csv")))
+
+
+sim_res <- full_join(full_join(sim_res_low %>% mutate(scenario="Low Transmission"),
+                               sim_res_mid %>% mutate(scenario="Moderate Transmission")),
+                               sim_res_high %>% mutate(scenario="High Transmission"))
+sim_res$R <- sim_res$beta * n_Icomp / gamma
+sim_res <- sim_res %>% mutate(scenario = factor(scenario, levels=c("Low Transmission", "Moderate Transmission", "High Transmission"), ordered = TRUE))
+
+sim_res <- sim_res %>% filter(!is.na(sim))
+
+write_csv(sim_res, 
+          file.path("results", project, paste0("sim_res_", res_date, ".csv")))
+
+```
+
+### ~ Load sim results
+```{r}
+sim_res <- read_csv(file.path("results", project, paste0("sim_res_", res_date, ".csv")))
+sim_res <- sim_res %>% 
+  mutate(scenario = factor(scenario, 
+                           levels=c("Low Transmission", "Moderate Transmission", 
+                                    "High Transmission"), ordered = TRUE))
+```
+
+
+
+## TABLE 1  
+        
+```{r}
+
+# Final Size - IN first 550 days
+summ_ <- sim_res %>% as.data.frame() %>% group_by(sim_beta, scenario) %>% 
+  summarise(final_size = max(cum_cases, na.rm=TRUE),
+            max_daily_incid = max(incidI, na.rm=TRUE),
+            max_daily_hosp  = max(incidH, na.rm=TRUE),
+            max_daily_icu  = max(incidICU, na.rm=TRUE),
+            max_daily_vent  = max(incidVent, na.rm=TRUE),
+            max_daily_death  = max(incidD, na.rm=TRUE),
+            max_curr_hosp   = max(hosp_curr, na.rm=TRUE),
+            max_curr_icu   = max(icu_curr, na.rm=TRUE),
+            #max_curr_vent   = max(vent_curr, na.rm=TRUE),
+            final_death  = max(cum_death, na.rm=TRUE),
+            final_hosp  = max(cum_hosp, na.rm=TRUE),
+            final_vent  = max(cum_vent, na.rm=TRUE),
+            final_icu  = max(cum_icu, na.rm=TRUE))
+
+final_size_ <- summ_ %>% group_by(scenario) %>% 
+  summarise(mean = mean(final_size, na.rm=TRUE),
+            median = median(final_size, na.rm=TRUE),
+            ll = quantile(final_size, prob=c(.0275)),
+            ul = quantile(final_size, prob=c(.975)),
+            finalsize10 = mean(final_size>=10, na.rm=TRUE),
+            finalsize100 = mean(final_size>=100, na.rm=TRUE),
+            finalsize1000 = mean(final_size>=1000, na.rm=TRUE))
+
+final_size_min100 <- summ_ %>% filter(final_size>=100) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(final_size, na.rm=TRUE),
+            median = median(final_size, na.rm=TRUE),
+            ll = quantile(final_size, prob=c(.0275)),
+            ul = quantile(final_size, prob=c(.975)))
+
+final_size_min1000 <- summ_ %>% filter(final_size>=1000) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(final_size, na.rm=TRUE),
+            median = median(final_size, na.rm=TRUE),
+            ll = quantile(final_size, prob=c(.0275)),
+            ul = quantile(final_size, prob=c(.975)))
+
+incid <- summ_ %>% filter(final_size>=1000) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(max_daily_incid, na.rm=TRUE),
+            median = median(max_daily_incid, na.rm=TRUE),
+            ll = quantile(max_daily_incid, prob=c(.0275)),
+            ul = quantile(max_daily_incid, prob=c(.975)))
+
+hosps <- summ_ %>% filter(final_size>=1000) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(final_hosp, na.rm=TRUE),
+            median = median(final_hosp, na.rm=TRUE),
+            ll = quantile(final_hosp, prob=c(.0275)),
+            ul = quantile(final_hosp, prob=c(.975)))
+
+curr_hosp <- summ_ %>% filter(final_size>=1000) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(max_curr_hosp, na.rm=TRUE),
+            median = median(max_curr_hosp, na.rm=TRUE),
+            ll = quantile(max_curr_hosp, prob=c(.0275)),
+            ul = quantile(max_curr_hosp, prob=c(.975)))
+
+hosp_incid <- summ_ %>% filter(final_size>=1000) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(max_daily_hosp, na.rm=TRUE),
+            median = median(max_daily_hosp, na.rm=TRUE),
+            ll = quantile(max_daily_hosp, prob=c(.0275)),
+            ul = quantile(max_daily_hosp, prob=c(.975)))
+
+deaths <- summ_ %>% filter(final_size>=1000) %>%
+  group_by(scenario) %>% 
+  summarise(mean = mean(final_death, na.rm=TRUE),
+            median = median(final_death, na.rm=TRUE),
+            ll = quantile(final_death, prob=c(.0275)),
+            ul = quantile(final_death, prob=c(.975)))
+
+# Summarize day hospital cases exceeds capacity
+
+hospexceeds <- sim_res %>% group_by(scenario, sim_beta) %>% 
+  filter(hosp_curr>340) %>%
+  summarise( dayexceeds = min(day, na.rm=TRUE)) %>% ungroup() %>% group_by(scenario) %>%
+  summarise(mean=mean(dayexceeds, na.rm=TRUE),
+            ll = quantile(dayexceeds, .025, na.rm=TRUE), 
+            ul = quantile(dayexceeds, .975, na.rm=TRUE))
+
+
+
+table1 <- final_size_min100 %>% mutate(pr_outbreak=final_size_$finalsize100) %>%
+  mutate(tot_inf = paste0(round(mean), " (",round(ll),"-",round(ul),")"),
+          tot_hosp = paste0(round(hosps$mean), " (",round(hosps$ll),"-",round(hosps$ul),")"),
+          tot_deaths = paste0(round(deaths$mean), " (",round(deaths$ll),"-",round(deaths$ul),")"),
+          max_incid = paste0(round(incid$mean), " (",round(incid$ll),"-",round(incid$ul),")"),
+          max_hosp_incid = paste0(round(hosp_incid$mean), " (",round(hosp_incid$ll),"-",round(hosp_incid$ul),")"),
+          max_hosp_curr = paste0(round(curr_hosp$mean), " (",round(curr_hosp$ll),"-",round(curr_hosp$ul),")"),
+          day_hosp_exceed = paste0(round(hospexceeds$mean), " (",round(hospexceeds$ll),"-",round(hospexceeds$ul),")"),) %>%
+  select(scenario, pr_outbreak, tot_inf, tot_hosp, tot_deaths, max_incid, max_hosp_incid, max_hosp_curr, day_hosp_exceed)
+
+table1
+write_csv(table1, file.path("results", project, "Table1.csv"))
+
+
+```
+
+
+## Table 1 - Alternate Hospital Capacity
+```{r}
+
+
+# Summarize day cum cases exceeds 100
+hospexceeds <- sim_res %>% group_by(scenario, sim_beta) %>% 
+  filter(hosp_curr>630) %>%
+  summarise( dayexceeds = min(day, na.rm=TRUE)) %>% group_by(scenario) %>%
+  summarise(mean=mean(dayexceeds, na.rm=TRUE),
+            ll = quantile(dayexceeds, .025, na.rm=TRUE), 
+            ul = quantile(dayexceeds, .975, na.rm=TRUE))
+
+
+
+ table1alt <- final_size_min100 %>% mutate(pr_outbreak=final_size_$finalsize100) %>%
+  mutate(tot_inf = paste0(round(mean), " (",round(ll),"-",round(ul),")"),
+          tot_hosp = paste0(round(hosps$mean), " (",round(hosps$ll),"-",round(hosps$ul),")"),
+          tot_deaths = paste0(round(deaths$mean), " (",round(deaths$ll),"-",round(deaths$ul),")"),
+          max_incid = paste0(round(incid$mean), " (",round(incid$ll),"-",round(incid$ul),")"),
+          max_hosp_incid = paste0(round(hosp_incid$mean), " (",round(hosp_incid$ll),"-",round(hosp_incid$ul),")"),
+          max_hosp_curr = paste0(round(curr_hosp$mean), " (",round(curr_hosp$ll),"-",round(curr_hosp$ul),")"),
+          day_hosp_exceed = paste0(round(hospexceeds$mean), " (",round(hospexceeds$ll),"-",round(hospexceeds$ul),")"),) %>%
+  select(scenario, pr_outbreak, tot_inf, tot_hosp, tot_deaths, max_incid, max_hosp_incid, max_hosp_curr, day_hosp_exceed)
+
+table1alt
+write_csv(table1alt, file.path("results", project, "Table1_alt.csv"))
+
+```
+
+
+
+
+
+```{r}
+
+# case_data <- read_csv("data/case_data.csv")
+# hubei_cases <- case_data %>% filter(Province_State=="Hubei") %>% arrange(t)
+# hubei_cases$est_infections <- hubei_cases$est_incid / p_hosp_china_low
+
+sim_res_summ <- sim_res %>% group_by(scenario, day) %>% 
+  summarise(incid_mean = mean(incidI, na.rm=TRUE),
+            cum_mean   = mean(cum_cases, na.rm=TRUE),
+            hosp_incid_mean = mean(incidH, na.rm=TRUE),
+            hosp_cum_mean = mean(cum_hosp, na.rm=TRUE),
+            hosp_curr_mean = mean(hosp_curr, na.rm=TRUE),
+            icu_cum_mean = mean(cum_icu, na.rm=TRUE),
+            icu_curr_mean = mean(icu_curr, na.rm=TRUE),
+            vent_cum_mean = mean(cum_vent, na.rm=TRUE),
+            #vent_curr_mean = mean(vent_curr, na.rm=TRUE),
+            death_incid_mean = mean(incidD, na.rm=TRUE),
+            death_cum_mean = mean(cum_death, na.rm=TRUE),
+
+            incid_ll = quantile(incidI, prob=.0275, na.rm=TRUE),
+            cum_ll   = quantile(cum_cases, prob=.0275, na.rm=TRUE),
+            hosp_incid_ll = quantile(incidH, prob=.0275, na.rm=TRUE),
+            hosp_cum_ll = quantile(cum_hosp, prob=.0275, na.rm=TRUE),
+            hosp_curr_ll = quantile(hosp_curr, prob=.0275, na.rm=TRUE),
+            icu_incid_ll = quantile(incidICU, prob=.0275, na.rm=TRUE),
+            icu_cum_ll = quantile(cum_icu, prob=.0275, na.rm=TRUE),
+            icu_curr_ll = quantile(icu_curr, prob=.0275, na.rm=TRUE),
+            vent_incid_ll = quantile(incidVent, prob=.0275, na.rm=TRUE),
+            vent_cum_ll = quantile(cum_vent, prob=.0275, na.rm=TRUE),
+            #vent_curr_ll = quantile(vent_curr, prob=.0275, na.rm=TRUE),
+            death_incid_ll = quantile(incidD, prob=.0275, na.rm=TRUE),
+            death_cum_ll = quantile(cum_death, prob=.0275, na.rm=TRUE),
+            
+            incid_ul = quantile(incidI, prob=.975, na.rm=TRUE),
+            cum_ul   = quantile(cum_cases, prob=.975, na.rm=TRUE),
+            hosp_incid_ul = quantile(incidH, prob=.975, na.rm=TRUE),
+            hosp_cum_ul = quantile(cum_hosp, prob=.975, na.rm=TRUE),
+            hosp_curr_ul = quantile(hosp_curr, prob=.975, na.rm=TRUE),
+            icu_cum_ul = quantile(cum_icu, prob=.975, na.rm=TRUE),
+            icu_curr_ul = quantile(icu_curr, prob=.975, na.rm=TRUE),
+            vent_cum_ul = quantile(cum_vent, prob=.975, na.rm=TRUE),
+            #vent_curr_ul = quantile(vent_curr, prob=.975, na.rm=TRUE),
+            death_incid_ul = quantile(incidD, prob=.975, na.rm=TRUE),
+            death_cum_ul = quantile(cum_death, prob=.975, na.rm=TRUE))
+
+```
+
+
+
+
+```{r}
+
+sim_res_outbreaks <- sim_res %>% group_by(scenario, sim_beta) %>% 
+  mutate(sim_max = max(cum_cases, na.rm = TRUE)) %>%
+  filter(cum_cases >= 1000 ) 
+  
+sim_res_summ_outbreak <- sim_res_outbreaks %>% group_by(scenario, day) %>% 
+  summarise(incid_mean = mean(incidI, na.rm=TRUE),
+            cum_mean   = mean(cum_cases, na.rm=TRUE),
+            hosp_incid_mean = mean(incidH, na.rm=TRUE),
+            hosp_cum_mean = mean(cum_hosp, na.rm=TRUE),
+            hosp_curr_mean = mean(hosp_curr, na.rm=TRUE),
+            icu_cum_mean = mean(cum_icu, na.rm=TRUE),
+            icu_curr_mean = mean(icu_curr, na.rm=TRUE),
+            vent_cum_mean = mean(cum_vent, na.rm=TRUE),
+            #vent_curr_mean = mean(vent_curr, na.rm=TRUE),
+            death_incid_mean = mean(incidD, na.rm=TRUE),
+            death_cum_mean = mean(cum_death, na.rm=TRUE),
+
+            incid_ll = quantile(incidI, prob=.0275, na.rm=TRUE),
+            cum_ll   = quantile(cum_cases, prob=.0275, na.rm=TRUE),
+            hosp_incid_ll = quantile(incidH, prob=.0275, na.rm=TRUE),
+            hosp_cum_ll = quantile(cum_hosp, prob=.0275, na.rm=TRUE),
+            hosp_curr_ll = quantile(hosp_curr, prob=.0275, na.rm=TRUE),
+            icu_incid_ll = quantile(incidICU, prob=.0275, na.rm=TRUE),
+            icu_cum_ll = quantile(cum_icu, prob=.0275, na.rm=TRUE),
+            icu_curr_ll = quantile(icu_curr, prob=.0275, na.rm=TRUE),
+            vent_incid_ll = quantile(incidVent, prob=.0275, na.rm=TRUE),
+            vent_cum_ll = quantile(cum_vent, prob=.0275, na.rm=TRUE),
+            #vent_curr_ll = quantile(vent_curr, prob=.0275, na.rm=TRUE),
+            death_incid_ll = quantile(incidD, prob=.0275, na.rm=TRUE),
+            death_cum_ll = quantile(cum_death, prob=.0275, na.rm=TRUE),
+            
+            incid_ul = quantile(incidI, prob=.975, na.rm=TRUE),
+            cum_ul   = quantile(cum_cases, prob=.975, na.rm=TRUE),
+            hosp_incid_ul = quantile(incidH, prob=.975, na.rm=TRUE),
+            hosp_cum_ul = quantile(cum_hosp, prob=.975, na.rm=TRUE),
+            hosp_curr_ul = quantile(hosp_curr, prob=.975, na.rm=TRUE),
+            icu_cum_ul = quantile(cum_icu, prob=.975, na.rm=TRUE),
+            icu_curr_ul = quantile(icu_curr, prob=.975, na.rm=TRUE),
+            vent_cum_ul = quantile(cum_vent, prob=.975, na.rm=TRUE),
+            #vent_curr_ul = quantile(vent_curr, prob=.975, na.rm=TRUE),
+            death_incid_ul = quantile(incidD, prob=.975, na.rm=TRUE),
+            death_cum_ul = quantile(cum_death, prob=.975, na.rm=TRUE))
+
+```
+
+
+
+
+## TABLE 2
+
+
+```{r}
+
+max_day_datahigh <- sim_res_outbreaks %>% filter(scenario=="High Transmission") %>% 
+  group_by(sim_beta) %>% mutate(maxday = max(day), na.rm=TRUE) %>% ungroup() %>% filter(day==maxday)
+
+max_day_datamid <- sim_res_outbreaks %>% filter(scenario=="Moderate Transmission") %>% 
+  filter(day<=365) %>%
+  group_by(sim_beta) %>% mutate(maxday = max(day), na.rm=TRUE) %>% ungroup() %>% filter(day==maxday)
+
+
+sim_res_summ_outbreak_days <- sim_res_outbreaks %>% filter(day %in% c(30, 91, 182, 365)) %>%
+  group_by(day, scenario) %>%
+  summarise(incid_mean = mean(incidI, na.rm=TRUE),
+            cum_mean   = mean(cum_cases, na.rm=TRUE),
+            hosp_incid_mean = mean(incidH, na.rm=TRUE),
+            hosp_cum_mean = mean(cum_hosp, na.rm=TRUE),
+            hosp_curr_mean = mean(hosp_curr, na.rm=TRUE),
+            icu_cum_mean = mean(cum_icu, na.rm=TRUE),
+            icu_curr_mean = mean(icu_curr, na.rm=TRUE),
+            vent_cum_mean = mean(cum_vent, na.rm=TRUE),
+            #vent_curr_mean = mean(vent_curr, na.rm=TRUE),
+            death_incid_mean = mean(incidD, na.rm=TRUE),
+            death_cum_mean = mean(cum_death, na.rm=TRUE),
+
+            incid_ll = quantile(incidI, prob=.0275, na.rm=TRUE),
+            cum_ll   = quantile(cum_cases, prob=.0275, na.rm=TRUE),
+            hosp_incid_ll = quantile(incidH, prob=.0275, na.rm=TRUE),
+            hosp_cum_ll = quantile(cum_hosp, prob=.0275, na.rm=TRUE),
+            hosp_curr_ll = quantile(hosp_curr, prob=.0275, na.rm=TRUE),
+            icu_incid_ll = quantile(incidICU, prob=.0275, na.rm=TRUE),
+            icu_cum_ll = quantile(cum_icu, prob=.0275, na.rm=TRUE),
+            icu_curr_ll = quantile(icu_curr, prob=.0275, na.rm=TRUE),
+            vent_incid_ll = quantile(incidVent, prob=.0275, na.rm=TRUE),
+            vent_cum_ll = quantile(cum_vent, prob=.0275, na.rm=TRUE),
+            #vent_curr_ll = quantile(vent_curr, prob=.0275, na.rm=TRUE),
+            death_incid_ll = quantile(incidD, prob=.0275, na.rm=TRUE),
+            death_cum_ll = quantile(cum_death, prob=.0275, na.rm=TRUE),
+            
+            incid_ul = quantile(incidI, prob=.975, na.rm=TRUE),
+            cum_ul   = quantile(cum_cases, prob=.975, na.rm=TRUE),
+            hosp_incid_ul = quantile(incidH, prob=.975, na.rm=TRUE),
+            hosp_cum_ul = quantile(cum_hosp, prob=.975, na.rm=TRUE),
+            hosp_curr_ul = quantile(hosp_curr, prob=.975, na.rm=TRUE),
+            icu_cum_ul = quantile(cum_icu, prob=.975, na.rm=TRUE),
+            icu_curr_ul = quantile(icu_curr, prob=.975, na.rm=TRUE),
+            vent_cum_ul = quantile(cum_vent, prob=.975, na.rm=TRUE),
+            #vent_curr_ul = quantile(vent_curr, prob=.975, na.rm=TRUE),
+            death_incid_ul = quantile(incidD, prob=.975, na.rm=TRUE),
+            death_cum_ul = quantile(cum_death, prob=.975, na.rm=TRUE))
+
+sim_res_summ_outbreak_daysHigh <- max_day_datahigh %>%
+  group_by(scenario) %>%
+  summarise(incid_mean = mean(incidI, na.rm=TRUE),
+            cum_mean   = mean(cum_cases, na.rm=TRUE),
+            hosp_incid_mean = mean(incidH, na.rm=TRUE),
+            hosp_cum_mean = mean(cum_hosp, na.rm=TRUE),
+            hosp_curr_mean = mean(hosp_curr, na.rm=TRUE),
+            icu_cum_mean = mean(cum_icu, na.rm=TRUE),
+            icu_curr_mean = mean(icu_curr, na.rm=TRUE),
+            vent_cum_mean = mean(cum_vent, na.rm=TRUE),
+            #vent_curr_mean = mean(vent_curr, na.rm=TRUE),
+            death_incid_mean = mean(incidD, na.rm=TRUE),
+            death_cum_mean = mean(cum_death, na.rm=TRUE),
+
+            incid_ll = quantile(incidI, prob=.0275, na.rm=TRUE),
+            cum_ll   = quantile(cum_cases, prob=.0275, na.rm=TRUE),
+            hosp_incid_ll = quantile(incidH, prob=.0275, na.rm=TRUE),
+            hosp_cum_ll = quantile(cum_hosp, prob=.0275, na.rm=TRUE),
+            hosp_curr_ll = quantile(hosp_curr, prob=.0275, na.rm=TRUE),
+            icu_incid_ll = quantile(incidICU, prob=.0275, na.rm=TRUE),
+            icu_cum_ll = quantile(cum_icu, prob=.0275, na.rm=TRUE),
+            icu_curr_ll = quantile(icu_curr, prob=.0275, na.rm=TRUE),
+            vent_incid_ll = quantile(incidVent, prob=.0275, na.rm=TRUE),
+            vent_cum_ll = quantile(cum_vent, prob=.0275, na.rm=TRUE),
+            #vent_curr_ll = quantile(vent_curr, prob=.0275, na.rm=TRUE),
+            death_incid_ll = quantile(incidD, prob=.0275, na.rm=TRUE),
+            death_cum_ll = quantile(cum_death, prob=.0275, na.rm=TRUE),
+            
+            incid_ul = quantile(incidI, prob=.975, na.rm=TRUE),
+            cum_ul   = quantile(cum_cases, prob=.975, na.rm=TRUE),
+            hosp_incid_ul = quantile(incidH, prob=.975, na.rm=TRUE),
+            hosp_cum_ul = quantile(cum_hosp, prob=.975, na.rm=TRUE),
+            hosp_curr_ul = quantile(hosp_curr, prob=.975, na.rm=TRUE),
+            icu_cum_ul = quantile(cum_icu, prob=.975, na.rm=TRUE),
+            icu_curr_ul = quantile(icu_curr, prob=.975, na.rm=TRUE),
+            vent_cum_ul = quantile(cum_vent, prob=.975, na.rm=TRUE),
+            #vent_curr_ul = quantile(vent_curr, prob=.975, na.rm=TRUE),
+            death_incid_ul = quantile(incidD, prob=.975, na.rm=TRUE),
+            death_cum_ul = quantile(cum_death, prob=.975, na.rm=TRUE))
+
+
+sim_res_summ_outbreak_daysModerate <- max_day_datamid %>%
+  group_by(scenario) %>%
+  summarise(incid_mean = mean(incidI, na.rm=TRUE),
+            cum_mean   = mean(cum_cases, na.rm=TRUE),
+            hosp_incid_mean = mean(incidH, na.rm=TRUE),
+            hosp_cum_mean = mean(cum_hosp, na.rm=TRUE),
+            hosp_curr_mean = mean(hosp_curr, na.rm=TRUE),
+            icu_cum_mean = mean(cum_icu, na.rm=TRUE),
+            icu_curr_mean = mean(icu_curr, na.rm=TRUE),
+            vent_cum_mean = mean(cum_vent, na.rm=TRUE),
+            #vent_curr_mean = mean(vent_curr, na.rm=TRUE),
+            death_incid_mean = mean(incidD, na.rm=TRUE),
+            death_cum_mean = mean(cum_death, na.rm=TRUE),
+
+            incid_ll = quantile(incidI, prob=.0275, na.rm=TRUE),
+            cum_ll   = quantile(cum_cases, prob=.0275, na.rm=TRUE),
+            hosp_incid_ll = quantile(incidH, prob=.0275, na.rm=TRUE),
+            hosp_cum_ll = quantile(cum_hosp, prob=.0275, na.rm=TRUE),
+            hosp_curr_ll = quantile(hosp_curr, prob=.0275, na.rm=TRUE),
+            icu_incid_ll = quantile(incidICU, prob=.0275, na.rm=TRUE),
+            icu_cum_ll = quantile(cum_icu, prob=.0275, na.rm=TRUE),
+            icu_curr_ll = quantile(icu_curr, prob=.0275, na.rm=TRUE),
+            vent_incid_ll = quantile(incidVent, prob=.0275, na.rm=TRUE),
+            vent_cum_ll = quantile(cum_vent, prob=.0275, na.rm=TRUE),
+            #vent_curr_ll = quantile(vent_curr, prob=.0275, na.rm=TRUE),
+            death_incid_ll = quantile(incidD, prob=.0275, na.rm=TRUE),
+            death_cum_ll = quantile(cum_death, prob=.0275, na.rm=TRUE),
+            
+            incid_ul = quantile(incidI, prob=.975, na.rm=TRUE),
+            cum_ul   = quantile(cum_cases, prob=.975, na.rm=TRUE),
+            hosp_incid_ul = quantile(incidH, prob=.975, na.rm=TRUE),
+            hosp_cum_ul = quantile(cum_hosp, prob=.975, na.rm=TRUE),
+            hosp_curr_ul = quantile(hosp_curr, prob=.975, na.rm=TRUE),
+            icu_cum_ul = quantile(cum_icu, prob=.975, na.rm=TRUE),
+            icu_curr_ul = quantile(icu_curr, prob=.975, na.rm=TRUE),
+            vent_cum_ul = quantile(cum_vent, prob=.975, na.rm=TRUE),
+            #vent_curr_ul = quantile(vent_curr, prob=.975, na.rm=TRUE),
+            death_incid_ul = quantile(incidD, prob=.975, na.rm=TRUE),
+            death_cum_ul = quantile(cum_death, prob=.975, na.rm=TRUE))
+
+
+
+sim_res_summ_outbreak_days <- bind_rows(sim_res_summ_outbreak_days,
+                                        sim_res_summ_outbreak_daysModerate %>% mutate(day=365),
+                                        sim_res_summ_outbreak_daysHigh %>% mutate(day=365))
+
+table2 <- sim_res_summ_outbreak_days %>% group_by(scenario, day) %>%
+  mutate(cum_inf = paste0(round(cum_mean), " (",round(cum_ll),"-",round(cum_ul),")"),
+         cum_hosp = paste0(round(hosp_cum_mean), " (",round(hosp_cum_ll),"-",round(hosp_cum_ul),")"),
+         cum_icu = paste0(round(icu_cum_mean), " (",round(icu_cum_ll),"-",round(icu_cum_ul),")"),
+         cum_vent = paste0(round(vent_cum_mean), " (",round(vent_cum_ll),"-",round(vent_cum_ul),")"),
+         cum_death = paste0(round(death_cum_mean), " (",round(death_cum_ll),"-",round(death_cum_ul),")")) %>%
+  select(scenario, day, cum_inf, cum_hosp, cum_icu, cum_vent, cum_death)
+  #mutate(scen_day = paste0(scenario," - ",day)) %>% select(-scenario, -day) 
+
+table2
+write_csv(table2, file.path("results", project, "Table2.csv"))
+
+
+View(data.frame(sim_res_summ_outbreak_days[,c(1:2)], round(sim_res_summ_outbreak_days[,-c(1:3)] / 600000,2)))
+
+
+```
+
+
+### Time intervals
+
+```{r}
+
+View(sim_res_summ_outbreak %>% filter(day==30) %>%
+       summarise(
+  inf = paste0(round(cum_mean), " (", round(cum_ll), "-", round(cum_ul),")"),
+  hosp = paste0(round(hosp_cum_mean), " (", round(hosp_cum_ll), "-", round(hosp_cum_ul),")"),
+  death = paste0(round(death_cum_mean), " (", round(death_cum_ll), "-", round(death_cum_ul),")")))
+
+
+View(sim_res_summ_outbreak %>% filter(day==60) %>% 
+       summarise(
+  inf = paste0(round(cum_mean), " (", round(cum_ll), "-", round(cum_ul),")"),
+  hosp = paste0(round(hosp_cum_mean), " (", round(hosp_cum_ll), "-", round(hosp_cum_ul),")"),
+  death = paste0(round(death_cum_mean), " (", round(death_cum_ll), "-", round(death_cum_ul),")")))
+
+View(sim_res_summ_outbreak %>% filter(day==90) %>% 
+       summarise(
+  inf = paste0(round(cum_mean), " (", round(cum_ll), "-", round(cum_ul),")"),
+  hosp = paste0(round(hosp_cum_mean), " (", round(hosp_cum_ll), "-", round(hosp_cum_ul),")"),
+  death = paste0(round(death_cum_mean), " (", round(death_cum_ll), "-", round(death_cum_ul),")")))
+
+
+```
+
+
+
+
+
+
+# PLOTS
+    
+    
+
+### 3-Curve Panel
+
+```{r, echo=FALSE}
+
+# Incid mean
+sim_res_summ <- sim_res_summ_outbreak %>% as.data.frame() %>%
+                    mutate(scenario = factor(scenario, 
+                           levels=c("Low Transmission", "Moderate Transmission", 
+                                    "High Transmission"), ordered = TRUE))
+
+
+pincid <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=incid_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=incid_ll, ymax=incid_ul, group=scenario, fill=scenario), alpha=.3) + 
+    # geom_line(data=hubei_cases, aes(x=0:(nrow(hubei_cases)-1), y=est_infections), color="grey50", alpha=.5, size=1.5) +
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+    theme(legend.position = c(0.8, 0.8),
+          legend.title = element_blank()) +
+          scale_color_brewer(palette = "Set1", direction = -1) +
+    scale_fill_brewer(palette = "Set1", direction = -1) +
+    ylab("Incident infections") + xlab("Day") +
+  ggtitle("Estimated daily incident infections")
+
+pincidhosp <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=hosp_incid_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=hosp_incid_ll, ymax=hosp_incid_ul, group=scenario, fill=scenario), alpha=.3) + 
+    theme_classic() + 
+    scale_color_brewer(palette = "Set1", direction = -1) +
+    scale_fill_brewer(palette = "Set1", direction = -1) +
+    #geom_hline(yintercept = 630, col="red", linetype="dashed") +
+    theme(legend.position = "none") +
+    ylab("Daily hospitalizations") + xlab("Day") +
+  ggtitle("Estimated daily hospitalizations")
+
+pincidhosp_vHubei <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=hosp_incid_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=hosp_incid_ll, ymax=hosp_incid_ul, group=scenario, fill=scenario), alpha=.3) + 
+    geom_line(data=hubei_cases, aes(x=(0:(nrow(hubei_cases)-1)+30), y=est_incid), 
+              color="grey50", alpha=.5, size=1.5) +
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+        scale_color_brewer(palette = "Set1", direction = -1) +
+    scale_fill_brewer(palette = "Set1", direction = -1) +
+      geom_hline(yintercept = 340, col="red", linetype="dashed") +
+
+    theme(legend.position = "none") +
+    ylab("Daily hospitalizations") + xlab("Day") +
+  ggtitle("Estimated hospitalizations, Kutupalong-Balukhali refuge camp versus those observed in Hubei, China")
+
+pinciddeath <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=death_incid_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=death_incid_ll, ymax=death_incid_ul, group=scenario, fill=scenario), alpha=.3) + 
+    theme_classic() + 
+        scale_color_brewer(palette = "Set1", direction = -1) +
+    scale_fill_brewer(palette = "Set1", direction = -1) +
+    theme(legend.position = "none") +
+    ylab("Daily deaths") + xlab("Day") +
+  ggtitle("Estimated daily deaths")
+
+
+
+# Cum Infections
+pcuminf <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=cum_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=cum_ll, ymax=cum_ul, group=scenario, fill=scenario), alpha=.3) + 
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+    #theme(legend.position = c(0.8, 0.8)) +
+        scale_color_brewer(palette = "Set2", direction = -1) +
+    scale_fill_brewer(palette = "Set2", direction = -1) +
+    ylab("Cumulative infections") + xlab("Day") +
+  ggtitle("Cumulative infections")
+
+
+# Cum Hospitalizations
+pcumhosp <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=hosp_cum_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=hosp_cum_ll, ymax=hosp_cum_ul, group=scenario, fill=scenario), alpha=.3) + 
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+    #theme(legend.position = c(0.8, 0.8)) +
+      scale_color_brewer(palette = "Set2", direction = -1) +
+    scale_fill_brewer(palette = "Set2", direction = -1) +
+    ylab("Cumulative hospitalizations") + xlab("Day") +
+  ggtitle("Cumulative hospitalizations")
+
+
+# Cum Deaths
+pcumdeath <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=death_cum_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=death_cum_ll, ymax=death_cum_ul, group=scenario, fill=scenario), alpha=.3) + 
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+    #theme(legend.position = c(0.8, 0.8)) +
+      scale_color_brewer(palette = "Set2", direction = -1) +
+    scale_fill_brewer(palette = "Set2", direction = -1) +
+    ylab("Cumulative deaths") + xlab("Day") +
+  ggtitle("Cumulative deaths")
+
+
+p_panel <- gridExtra::grid.arrange(pincid,pincidhosp,pinciddeath, nrow=3)
+ggsave(file.path("figures", project, "sim_res_panel.png"), p_panel, width=8, height=10, dpi=900, units = "in")
+
+
+```
+
+
+### Hospitalization Capacity Needs
+
+```{r}
+
+# Current Hospitalizations
+pcurrhosp <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=hosp_curr_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=hosp_curr_ll, ymax=hosp_curr_ul, group=scenario, fill=scenario), alpha=.3) + 
+    geom_hline(yintercept = 340, col="red", linetype="dashed") +
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+  theme(legend.position = c(0.8, 0.8),
+          legend.title = element_blank()) +
+    ylab("Current hospitalized") + xlab("Day") +
+        scale_color_brewer(palette = "Set1", direction = -1) +
+    scale_fill_brewer(palette = "Set1", direction = -1) +
+  ggtitle("Daily hospitalization capacity required")
+
+
+pcurrhosp
+ggsave(file.path("figures", project, "curr_hosp.png"), width=8, height=4, dpi=600, units = "in")
+
+```
+
+
+#### Alternate Capacity - 630 beds
+```{r}
+
+# Current Hospitalizations
+pcurrhosp <- ggplot(data=sim_res_summ, aes(x=day)) +
+    geom_line(aes(y=hosp_curr_mean, group=scenario, color=scenario)) + 
+    geom_ribbon(aes(ymin=hosp_curr_ll, ymax=hosp_curr_ul, group=scenario, fill=scenario), alpha=.3) + 
+    geom_hline(yintercept = 630, col="red", linetype="dashed") +
+    #scale_y_continuous(trans="log") +
+    theme_classic() + 
+  theme(legend.position = c(0.8, 0.8),
+          legend.title = element_blank()) +
+    ylab("Current hospitalized") + xlab("Day") +
+        scale_color_brewer(palette = "Set1", direction = -1) +
+    scale_fill_brewer(palette = "Set1", direction = -1) +
+  ggtitle("Daily hospitalization capacity required")
+
+
+pcurrhosp
+ggsave(file.path("figures", project, "curr_hosp_alt630beds.png"), width=8, height=4, dpi=600, units = "in")
+
+```
+
+
+### Day 20th Case
+
+```{r, echo=FALSE}
+
+sim_res_nooutbreak <- sim_res %>% group_by(scenario, sim_beta) %>% 
+  mutate(max_cum = max(cum_cases)) %>% ungroup() %>%
+  filter(max_cum <=1000) %>% 
+  filter(cum_cases==max_cum) %>%
+  group_by(scenario, sim_beta) %>% filter(day==max(day))
+
+summary(sim_res_nooutbreak$max_cum)
+hist(sim_res_nooutbreak$max_cum)
+
+
+
+# First Date >20 cases
+sim_res <- sim_res %>% as.data.frame() %>%
+                    mutate(scenario = factor(scenario, 
+                           levels=c("Low Transmission", "Moderate Transmission", 
+                                    "High Transmission"), ordered = TRUE))
+
+day20case <- sim_res %>% filter(cum_cases>=20) %>% group_by(sim_beta, scenario) %>% summarize(minday = min(day)) 
+day20case_sum <- day20case %>% group_by(scenario) %>% 
+  summarize(mean = mean(minday), 
+            median = median(minday),
+            ll = quantile(minday, prob=c(.0275)),
+            ul = quantile(minday, prob=c(.975)))
+
+p_day20 <- ggplot(day20case, aes(x=minday, group=scenario, fill=scenario)) + 
+  geom_density(alpha=0.5) +
+  theme_classic() + 
+  coord_cartesian(xlim=c(0,150)) +
+  xlab("Day") + 
+  theme(legend.position = c(0.8, 0.8)) +
+  ggtitle("Day on which cumulative cases reaches 20")
+p_day20
+
+ggsave(file.path("figures", project, "day_20th_case.png"), p_day20, width=8, height=4, dpi=900, units = "in")
+
+```
+
+
+
+
+
+
+```{r}
+ 
+# ggplot() +
+#     geom_line(data=sim_res, aes(x=date, y=incid, group=sim_id, color=beta)) + 
+#     #coord_cartesian(xlim=c(as.Date("2020-01-15"), as.Date(Sys.Date())+14)) +
+#     theme_classic()
+# 
+# ggplot() +
+#     geom_line(data=sim_res, aes(x=date, y=cum_cases, group=sim_id, color=beta)) + 
+#     #coord_cartesian(xlim=c(as.Date("2020-01-15"), as.Date(Sys.Date())+14)) +
+#     theme_classic()
+# 
+# 
+# ggplot() +
+#     geom_line(data=sim_hospdeath, aes(x=t, y=hosp_curr, group=sim_beta, color=beta)) + 
+#     scale_colour_gradient(low="yellow", high="red") +
+#     #coord_cartesian(xlim=c(as.Date("2020-01-15"), as.Date(Sys.Date())+14)) +
+#     theme_classic()
+# 
+# ggplot() +
+#     geom_line(data=sim_hospdeath, aes(x=t, y=cum_hosp, group=sim_beta, color=beta)) + 
+#     scale_colour_gradient(low="yellow", high="red") +
+#     #coord_cartesian(xlim=c(as.Date("2020-01-15"), as.Date(Sys.Date())+14)) +
+#     theme_classic()
+# 
+# ggplot() +
+#     geom_line(data=sim_hospdeath, aes(x=t, y=cum_death, group=sim_beta, color=beta)) + 
+#     scale_colour_gradient(low="yellow", high="red") +
+#     #coord_cartesian(xlim=c(as.Date("2020-01-15"), as.Date(Sys.Date())+14)) +
+#     theme_classic()
+
+
+
+```
+
+
+
+
+## DISCUSSION
+    
+#### Hospitalization Rate       
+```{r}
+p_hosp_china_low
+p_hosp_kutupalong_low
+
+p_hosp_kutupalong_low /p_hosp_china_low
+
+p_hosp_china_high
+p_hosp_kutupalong_high
+
+p_hosp_kutupalong_high / p_hosp_china_high
+
+```
+
+
+
+Cumulative cases before hospitalizations
+
+```{r}
+
+
+hosp_1 <- sim_res %>% filter(cum_hosp>0) %>% group_by(scenario, sim_beta) %>% 
+  filter(t == min(t)) %>% group_by(scenario) %>% 
+  summarise(meanincid = mean(cum_exposed), ll = quantile(cum_exposed, c(.025)), ul = quantile(cum_exposed, c(.975)),
+            day = mean(day), dayll = quantile(day, c(.025)), dayul = quantile(day, c(.975)))
+summary((hosp_1 %>% filter(scenario=="High Transmission"))$day)
+summary((hosp_1 %>% filter(scenario=="Moderate Transmission"))$day)
+summary((hosp_1 %>% filter(scenario=="Low Transmission"))$day)
+
+
+
+
+hosp_10 <- sim_res %>% filter(cum_hosp>9) %>% group_by(scenario, sim_beta) %>% 
+  filter(t == min(t)) %>% group_by(scenario) %>% 
+  summarise(meanincid = mean(cum_exposed), ll = quantile(cum_exposed, c(.025)), ul = quantile(cum_exposed, c(.975)),
+            day = mean(day), dayll = quantile(day, c(.025)), dayul = quantile(day, c(.975)))
+summary((hosp_10 %>% filter(scenario=="High Transmission"))$day)
+summary((hosp_10 %>% filter(scenario=="Moderate Transmission"))$day)
+summary((hosp_10 %>% filter(scenario=="Low Transmission"))$day)
+
+
+
+hosp_20 <- sim_res %>% filter(cum_hosp>19) %>% group_by(scenario, sim_beta) %>% 
+  filter(t == min(t)) %>% group_by(scenario) %>% 
+  summarise(meanincid = mean(cum_exposed), ll = quantile(cum_exposed, c(.025)), ul = quantile(cum_exposed, c(.975)),
+            day = mean(day), dayll = quantile(day, c(.025)), dayul = quantile(day, c(.975)))
+
+
+hosp_1
+hosp_10
+hosp_20
+
+
+
+```
+
+
+
+Max hospitalization capacities
+
+```{r}
+
+hosp_capmax <- sim_res %>% filter(cum_cases>1000) %>% group_by(scenario, sim_beta) %>% 
+  mutate(max_hosp_cap = max(hosp_curr)) %>% ungroup() %>%
+  filter(hosp_curr==max_hosp_cap) %>% group_by(scenario) %>% 
+  summarise(maxhospday = mean(day), 
+            ll = quantile(day, c(.025)), 
+            ul = quantile(day, c(.975)))
+
+hosp_capmax
+
+
+```
+
+
